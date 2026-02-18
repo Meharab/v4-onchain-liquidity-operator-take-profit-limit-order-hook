@@ -11,6 +11,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
  
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+// import {CurrencySettler} from "v4-core/test/utils/CurrencySettler.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
  
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -40,6 +41,8 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
  
 	// Used for helpful math operations like `mulDiv`
     using FixedPointMathLib for uint256;
+
+    // using CurrencyLibrary for Currency;
  
     // Errors
     error InvalidOrder();
@@ -56,6 +59,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     mapping(uint256 orderId => uint256 claimsSupply)
         public claimTokensSupply;
 
+    // Store the claimable output tokens for an orderId
     mapping(uint256 orderId => uint256 outputClaimable)
         public claimableOutputTokens;
  
@@ -151,28 +155,34 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         int24 tick,
         bool zeroForOne
     ) public pure returns (uint256) {
-        return uint256(keccak256(abi.encode(key.toId(), tick, zeroForOne)));
+        return uint256(
+            keccak256(
+                abi.encode(key.toId(), tick, zeroForOne)
+            )
+        );
     }
 
     function placeOrder(
-        PoolKey calldata key,
+        PoolKey calldata key, // point 1
         int24 tickToSellAt,
         bool zeroForOne,
         uint256 inputAmount
     ) external returns (int24) {
         // Get lower actually usable tick given `tickToSellAt`
-        int24 tick = getLowerUsableTick(tickToSellAt, key.tickSpacing);
+        int24 tick = getLowerUsableTick(tickToSellAt, key.tickSpacing); // point 2
         // Create a pending order
-        pendingOrders[key.toId()][tick][zeroForOne] += inputAmount;
+        pendingOrders[key.toId()][tick][zeroForOne] += inputAmount; // point 3
     
         // Mint claim tokens to user equal to their `inputAmount`
-        uint256 orderId = getOrderId(key, tick, zeroForOne);
+        // point 4
+        uint256 orderId = getOrderId(key, tick, zeroForOne); 
         claimTokensSupply[orderId] += inputAmount;
         _mint(msg.sender, orderId, inputAmount, "");
     
         // Depending on direction of swap, we select the proper input token
         // and request a transfer of those tokens to the hook contract
-        address sellToken = zeroForOne
+        // point 5
+        address sellToken = zeroForOne 
             ? Currency.unwrap(key.currency0)
             : Currency.unwrap(key.currency1);
         IERC20(sellToken).transferFrom(msg.sender, address(this), inputAmount);
@@ -205,6 +215,8 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         // Send them their input token
         Currency token = zeroForOne ? key.currency0 : key.currency1;
         token.transfer(msg.sender, amountToCancel);
+        // address token = Currency.unwrap(zeroForOne ? key.currency0 : key.currency1);
+        // IERC20(token).transfer(msg.sender, amountToCancel);
     }
 
     /**
@@ -225,6 +237,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         uint256 inputAmountToClaimFor
     ) external {
         // Get lower actually usable tick for their order
+        // point 1
         int24 tick = getLowerUsableTick(tickToSellAt, key.tickSpacing);
         uint256 orderId = getOrderId(key, tick, zeroForOne);
     
@@ -233,9 +246,27 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         if (claimableOutputTokens[orderId] == 0) revert NothingToClaim();
     
         // they must have claim tokens >= inputAmountToClaimFor
+        // point 2
         uint256 claimTokens = balanceOf(msg.sender, orderId);
         if (claimTokens < inputAmountToClaimFor) revert NotEnoughToClaim();
-    
+
+        // point 3
+        // given that:
+        // claimTokens: amount of claimable input tokens they have for this position (i.e. their share of the order)
+        // totalClaimableForPosition: amount of output tokens we have from executing this position (not just from this user)
+        // totalInputAmountForPosition: total supply of input tokens for the order
+
+        // claimTokens: 100
+        // totalClaimableForPosition: 100
+        // totalInputAmountForPosition: 500
+
+        // user % of share of input amount:
+        // claimTokens / totalInputAmountForPosition = 100/500 = 20%
+        
+        // user share of output tokens:
+        // totalClaimableForPosition * (claimTokens / totalInputAmountForPosition)
+        // (claimTokens * totalClaimableForPosition) / totalInputAmountForPosition
+        // 100 * 100 / 500 = 20 output tokens to claim
         uint256 totalClaimableForPosition = claimableOutputTokens[orderId];
         uint256 totalInputAmountForPosition = claimTokensSupply[orderId];
     
@@ -247,14 +278,19 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     
         // Reduce claimable output tokens amount
         // Reduce claim token total supply for position
-        // Burn claim tokens
+        // point 4
         claimableOutputTokens[orderId] -= outputAmount;
         claimTokensSupply[orderId] -= inputAmountToClaimFor;
-        _burn(msg.sender, orderId, inputAmountToClaimFor);
+
+        // Burn claim tokens
+        _burn(msg.sender, orderId, inputAmountToClaimFor); // point 5
     
         // Transfer output tokens
+        // point 6
         Currency token = zeroForOne ? key.currency1 : key.currency0;
         token.transfer(msg.sender, outputAmount);
+        // address token = Currency.unwrap(zeroForOne ? key.currency0 : key.currency1);
+        // IERC20(token).transfer(msg.sender, amountToCancel);
     }
 
     /**
@@ -272,8 +308,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         SwapParams memory params
     ) internal returns (BalanceDelta) {
         // Conduct the swap inside the Pool Manager
-        BalanceDelta delta = poolManager.swap(key, params, "");
+        BalanceDelta delta = poolManager.swap(key, params, ""); // point 1
     
+        // point 2
         // If we just did a zeroForOne swap
         // We need to send Token 0 to PM, and receive Token 1 from PM
         if (params.zeroForOne) {
@@ -281,12 +318,14 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
             // Settle with PoolManager
             if (delta.amount0() < 0) {
                 _settle(key.currency0, uint128(-delta.amount0()));
+                // key.currency0.settle(manager, address(this), uint128(-delta.amount0()), false);
             }
     
             // Positive Value => Money coming into user's wallet
             // Take from PM
             if (delta.amount1() > 0) {
                 _take(key.currency1, uint128(delta.amount1()));
+                // key.currency1.take(manager, address(this), uint128(delta.amount1()), false);
             }
         } else {
             if (delta.amount1() < 0) {
@@ -335,11 +374,14 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         );
     
         // `inputAmount` has been deducted from this position
-        pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount;
+        pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount; // point 3
+        // `outputAmount` has been added`
+        // point 4
         uint256 orderId = getOrderId(key, tick, zeroForOne);
         uint256 outputAmount = zeroForOne
             ? uint256(int256(delta.amount1()))
             : uint256(int256(delta.amount0()));
+        // uint outputAmount = uint(int(zeroForOne ? delta.amount1() : delta.amount0()));
     
         // `outputAmount` worth of tokens now can be claimed/redeemed by position holders
         claimableOutputTokens[orderId] += outputAmount;
