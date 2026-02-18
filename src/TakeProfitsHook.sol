@@ -62,6 +62,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     // Store the claimable output tokens for an orderId
     mapping(uint256 orderId => uint256 outputClaimable)
         public claimableOutputTokens;
+
+    // a mapping to store last known tick values for different pools.
+    mapping(PoolId poolId => int24 lastTick) public lastTicks;
  
 	// Constructor
     constructor(
@@ -96,16 +99,103 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
             });
     }
  
+    // when a pool is initialized, it's current tick is set for the first time
     function _afterInitialize(
         address,
         PoolKey calldata key,
         uint160,
         int24 tick
     ) internal override returns (bytes4) {
-		// TODO
+		lastTicks[key.toId()] = tick;
         return this.afterInitialize.selector;
     }
 
+    function tryExecutingOrders(
+        PoolKey calldata key,
+        bool executeZeroForOne
+    ) internal returns (bool tryMore, int24 newTick) {
+        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
+        int24 lastTick = lastTicks[key.toId()];
+    
+        // Given `currentTick` and `lastTick`, 2 cases are possible:
+    
+        // Case (1) - Tick has increased, i.e. `currentTick > lastTick`
+        // or, Case (2) - Tick has decreased, i.e. `currentTick < lastTick`
+    
+        // If tick increases => Token 0 price has increased
+        // => We should check if we have orders looking to sell Token 0
+        // i.e. orders with zeroForOne = true
+             
+        // ------------
+        // Case (1)
+        // ------------
+    
+        // Tick has increased i.e. people bought Token 0 by selling Token 1
+        // i.e. Token 0 price has increased
+        // e.g. in an ETH/USDC pool, people are buying ETH for USDC causing ETH price to increase
+        // We should check if we have any orders looking to sell Token 0
+        // at ticks `lastTick` to `currentTick`
+        // i.e. check if we have any orders to sell ETH at the new price that ETH is at now because of the increase
+        if (currentTick > lastTick) {
+            // Loop over all ticks from `lastTick` to `currentTick`
+            // and execute orders that are looking to sell Token 0
+            for (
+                int24 tick = lastTick;
+                tick < currentTick;
+                tick += key.tickSpacing
+            ) {
+                uint256 inputAmount = pendingOrders[key.toId()][tick][executeZeroForOne];
+                if (inputAmount > 0) {
+                    // An order with these parameters can be placed by one or more users
+                    // We execute the full order as a single swap
+                    // Regardless of how many unique users placed the same order
+                    executeOrder(key, tick, executeZeroForOne, inputAmount);
+        
+                    // Return true because we may have more orders to execute
+                    // from lastTick to new current tick
+                    // But we need to iterate again from scratch since our sale of ETH shifted the tick down
+                    return (true, currentTick);
+                }
+            }
+        }
+    
+        // If tick decreases => Token 1 price has increased
+        // => We should check if we have orders looking to sell Token 1
+        // i.e. orders with zeroForOne = false
+    
+        // ------------
+        // Case (2)
+        // ------------
+
+        // Tick has gone down i.e. people bought Token 1 by selling Token 0
+        // i.e. Token 1 price has increased
+        // e.g. in an ETH/USDC pool, people are selling ETH for USDC causing ETH price to decrease (and USDC to increase)
+        // We should check if we have any orders looking to sell Token 1
+        // at ticks `currentTick` to `lastTick`
+        // i.e. check if we have any orders to buy ETH at the new price that ETH is at now because of the decrease
+        else {
+            for (
+                int24 tick = lastTick;
+                tick > currentTick;
+                tick -= key.tickSpacing
+            ) {
+                uint256 inputAmount = pendingOrders[key.toId()][tick][executeZeroForOne];
+                if (inputAmount > 0) {
+                    executeOrder(key, tick, executeZeroForOne, inputAmount);
+                    return (true, currentTick);
+                }
+            }
+        }
+    
+        // ------
+    
+        // If no orders were found to be executed, we don't need to try
+        // executing any more - return `false` and `currentTick`
+        return (false, currentTick);
+    }
+
+    // 1. Do not let afterSwap be triggered if it is being executed because of a swap our hook created while fulfilling an order (to prevent deep recursion and re-entrancy issues)
+    // 2. Identify tick shift range, find first order that can be fulfilled in that range, fill it - but then update tick shift range and search again if there are any new orders that can be fulfilled in this range or not - ignoring any orders that may have existed within the original tick shift range
     function _afterSwap(
         address sender,
         PoolKey calldata key,
@@ -113,7 +203,36 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, int128) {
-		// TODO
+		// `sender` is the address which initiated the swap
+        // if `sender` is the hook, we don't want to go down the `afterSwap`
+        // rabbit hole again
+        if (sender == address(this)) return (this.afterSwap.selector, 0);
+    
+        // Should we try to find and execute orders? True initially
+        bool tryMore = true;
+        int24 currentTick;
+    
+        while (tryMore) {
+            // Try executing pending orders for this pool
+    
+            // `tryMore` is true if we successfully found and executed an order
+            // which shifted the tick value
+            // and therefore we need to look again if there are any pending orders
+            // within the new tick range
+    
+            // `tickAfterExecutingOrder` is the tick value of the pool
+            // after executing an order
+            // if no order was executed, `tickAfterExecutingOrder` will be
+            // the same as current tick, and `tryMore` will be false
+            (tryMore, currentTick) = tryExecutingOrders(
+                key,
+                !params.zeroForOne
+            );
+        }
+    
+        // New last known tick for this pool is the tick value
+        // after our orders are executed
+        lastTicks[key.toId()] = currentTick;
         return (this.afterSwap.selector, 0);
     }
  
