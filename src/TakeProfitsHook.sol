@@ -49,6 +49,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     error NothingToClaim();
     error NotEnoughToClaim();
 
+    // transient storage slot for balance delta accounting
+    bytes32 constant BALANCE_DELTA_SLOT = keccak256('BALANCE_DELTA_SLOT');
+
     // we need is to create a mapping to store pending orders. We'll do a nested mapping for this, which can identify their position
     mapping(PoolId poolId =>
         mapping(int24 tickToSellAt =>
@@ -64,6 +67,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         public claimableOutputTokens;
 
     // a mapping to store last known tick values for different pools.
+    // maintain the mapping of previous tick value
     mapping(PoolId poolId => int24 lastTick) public lastTicks;
  
 	// Constructor
@@ -114,6 +118,8 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         PoolKey calldata key,
         bool executeZeroForOne
     ) internal returns (bool tryMore, int24 newTick) {
+        // store the tick
+        // get the current tick and last tick of the pool
         (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
         int24 lastTick = lastTicks[key.toId()];
     
@@ -151,7 +157,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
                     // Regardless of how many unique users placed the same order
                     executeOrder(key, tick, executeZeroForOne, inputAmount);
         
-                    // Return true because we may have more orders to execute
+                    // Return `tryMore` to true because we may have more orders to execute
                     // from lastTick to new current tick
                     // But we need to iterate again from scratch since our sale of ETH shifted the tick down
                     return (true, currentTick);
@@ -196,6 +202,10 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
 
     // 1. Do not let afterSwap be triggered if it is being executed because of a swap our hook created while fulfilling an order (to prevent deep recursion and re-entrancy issues)
     // 2. Identify tick shift range, find first order that can be fulfilled in that range, fill it - but then update tick shift range and search again if there are any new orders that can be fulfilled in this range or not - ignoring any orders that may have existed within the original tick shift range
+    /**
+    1. don't want to let aftreswap be triggered if it is being executed because of a swap that our hook created whilst fulfilling an order.
+    2. identify tick shift range, find first order that can be fulfilled and fill it. Then update the range and try within the boundraries.
+     */
     function _afterSwap(
         address sender,
         PoolKey calldata key,
@@ -206,9 +216,11 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
 		// `sender` is the address which initiated the swap
         // if `sender` is the hook, we don't want to go down the `afterSwap`
         // rabbit hole again
+        // if the `sender` is this address, then we are triggered from an order execution
         if (sender == address(this)) return (this.afterSwap.selector, 0);
     
         // Should we try to find and execute orders? True initially
+        // should we try and execute order?
         bool tryMore = true;
         int24 currentTick;
     

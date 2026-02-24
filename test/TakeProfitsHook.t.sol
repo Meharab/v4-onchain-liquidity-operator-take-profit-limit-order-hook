@@ -168,6 +168,7 @@ contract TakeProfitsHookTest is Test, Deployers, ERC1155Holder {
         assertEq(tokenBalance, 0);
     }
 
+    // Place a zeroForOne i.e. sell Token 0 order, and make sure it's executed if tick goes up enough
     function test_orderExecute_zeroForOne() public {
         int24 tick = 100;
         uint256 amount = 1 ether;
@@ -216,6 +217,7 @@ contract TakeProfitsHookTest is Test, Deployers, ERC1155Holder {
         );
     }
 
+    // Place a oneForZero i.e. sell Token 1 order, and make sure it's executed if tick goes down enough
     function test_orderExecute_oneForZero() public {
         int24 tick = -100;
         uint256 amount = 10 ether;
@@ -262,6 +264,7 @@ contract TakeProfitsHookTest is Test, Deployers, ERC1155Holder {
         );
     }
 
+    // Place two separate orders at different ticks, and make sure only one of them is executed if the fulfillment of the first order makes the second order no longer eligible to be executed
     function test_multiple_orderExecute_zeroForOne_onlyOne() public {
         PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
             .TestSettings({takeClaims: false, settleUsingBurn: false});
@@ -297,6 +300,7 @@ contract TakeProfitsHookTest is Test, Deployers, ERC1155Holder {
         assertEq(tokensLeftToSell, amount);
     }
 
+    // Place two separate orders at different ticks, and make sure both are executed if they remain eligible with the tick shift
     function test_multiple_orderExecute_zeroForOne_both() public {
         PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
             .TestSettings({takeClaims: false, settleUsingBurn: false});
