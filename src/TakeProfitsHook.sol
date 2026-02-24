@@ -18,6 +18,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {toBalanceDelta} from "v4-core/types/BalanceDelta.sol";
  
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
@@ -50,7 +51,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     error NotEnoughToClaim();
 
     // transient storage slot for balance delta accounting
-    bytes32 constant BALANCE_DELTA_SLOT = keccak256('BALANCE_DELTA_SLOT');
+    bytes32 constant BALANCE_DELTA_SLOT = 0; //keccak256('BALANCE_DELTA_SLOT');
 
     // we need is to create a mapping to store pending orders. We'll do a nested mapping for this, which can identify their position
     mapping(PoolId poolId =>
@@ -218,6 +219,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         // rabbit hole again
         // if the `sender` is this address, then we are triggered from an order execution
         if (sender == address(this)) return (this.afterSwap.selector, 0);
+
+        // flush our transient storage for balance delta
+        _tstore(BalanceDelta.wrap(0));
     
         // Should we try to find and execute orders? True initially
         // should we try and execute order?
@@ -241,6 +245,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
                 !params.zeroForOne
             );
         }
+
+        // account for swap
+        swapAndSettleBalances(key, params);
     
         // New last known tick for this pool is the tick value
         // after our orders are executed
@@ -439,7 +446,8 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         SwapParams memory params
     ) internal returns (BalanceDelta) {
         // Conduct the swap inside the Pool Manager
-        BalanceDelta delta = poolManager.swap(key, params, ""); // point 1
+        // BalanceDelta delta = poolManager.swap(key, params, ""); // point 1
+        BalanceDelta delta = _tload();
     
         // point 2
         // If we just did a zeroForOne swap
@@ -501,8 +509,18 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
                 sqrtPriceLimitX96: zeroForOne
                     ? TickMath.MIN_SQRT_PRICE + 1
                     : TickMath.MAX_SQRT_PRICE - 1
-            })
+            })//, 
+            // ''
         );
+
+        // get the balancedelta from transient storage
+        BalanceDelta existingDelta = _tload();
+
+        // add the new balance delta to the existing one
+        existingDelta = existingDelta + delta;
+
+        // update transient storage
+        _tstore(existingDelta);
     
         // `inputAmount` has been deducted from this position
         pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount; // point 3
@@ -516,5 +534,20 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     
         // `outputAmount` worth of tokens now can be claimed/redeemed by position holders
         claimableOutputTokens[orderId] += outputAmount;
+    }
+
+    function _tstore(BalanceDelta delta) internal {
+        int256 deltaStore = BalanceDelta.unwrap(delta);
+        assembly {
+            sstore(BALANCE_DELTA_SLOT, deltaStore)
+        }
+    }
+
+    function _tload() internal returns (BalanceDelta delta_) {
+        int256 rawDelta;
+        assembly {
+            rawDelta := sload(BALANCE_DELTA_SLOT)
+        }
+        return BalanceDelta.wrap(rawDelta);
     }
 }
